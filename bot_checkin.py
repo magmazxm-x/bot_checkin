@@ -3,35 +3,32 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import datetime, re, pytz, asyncio, io, time
+import datetime, re, pytz, asyncio, io, time, json, os
 import pytesseract
 from PIL import Image, ImageEnhance
-import os
 from flask import Flask
 from threading import Thread
 
+# --- [1] ระบบ Web Server สำหรับ Keep Alive บน Render ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot is Online!"
+    return "Police Bot is Online!"
 
-def run():
-    # ดึง Port ที่ Render กำหนดมาให้ ถ้าไม่มีให้ใช้ 8080
+def run_flask():
+    # ดึง Port จาก Render (Default 8080)
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
-    t = Thread(target=run)
+    t = Thread(target=run_flask)
     t.start()
 
-# เรียกใช้ก่อน bot.run(TOKEN)
-keep_alive()
-
-bot.run(TOKEN)
-
-import os
+# --- [2] ข้อมูลพื้นฐานและการดึงค่าความลับ ---
+# ดึง TOKEN และ Google Sheets Credentials จาก Environment Variables
 TOKEN = os.getenv('DISCORD_TOKEN')
+GOOGLE_CREDS = os.getenv('GOOGLE_CREDS_JSON')
 
 REG_CHANNEL_ID = 1495618190418378852
 NOTI_CHANNEL_ID = 1495617510974816316
@@ -53,16 +50,15 @@ EMOJI_JANG = f"<a:jang1:1496009919244275732>"
 
 tz = pytz.timezone('Asia/Bangkok')
 
-# --- [2] ระบบเชื่อมต่อ Google Sheets ---
-import json
-
+# --- [3] ระบบเชื่อมต่อ Google Sheets ---
 def connect_google_sheets():
     try:
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        # ดึงค่าจาก Environment Variable
-        creds_json = os.getenv('GOOGLE_CREDS_JSON')
-        creds_dict = json.loads(creds_json)
+        if not GOOGLE_CREDS:
+            print("❌ Error: GOOGLE_CREDS_JSON ไม่ถูกตั้งค่าใน Environment")
+            return None
         
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds_dict = json.loads(GOOGLE_CREDS)
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         return client.open("Police Bot").worksheet("ข้อมูลสมาชิกทั้งกิลด์")
@@ -70,6 +66,7 @@ def connect_google_sheets():
         print(f"❌ Connection Error: {e}")
         return None
 
+# สร้างตัวแปร sheet ไว้ใช้งาน
 sheet = connect_google_sheets()
 last_reset_date = None 
 
@@ -84,7 +81,7 @@ def safe_update(range_name, values):
             sheet = connect_google_sheets()
     return False
 
-# --- [3] ฟังก์ชันดึงข้อมูลจากข้อความแบบแม่นยำ ---
+# --- [4] ฟังก์ชันดึงข้อมูลและ OCR ---
 def get_clean_field(content, label):
     text = content.replace("**", "").replace("__", "").replace("`", "")
     lines = text.split('\n')
@@ -95,12 +92,12 @@ def get_clean_field(content, label):
                 return ":".join(parts[1:]).strip()
     return "ไม่ระบุ"
 
-# --- [4] ระบบสแกนภาพ (OCR) แยก Error ชัดเจน ---
 async def verify_image_details(attachment, today_str):
     try:
         image_data = await attachment.read()
         img = Image.open(io.BytesIO(image_data))
         img = ImageEnhance.Contrast(img).enhance(1.8)
+        # หมายเหตุ: Render อาจไม่มี Tesseract ลงไว้ให้ในตัว
         raw_text = pytesseract.image_to_string(img, lang='tha+eng', config='--psm 3').upper()
         raw_text += " " + pytesseract.image_to_string(img, lang='tha+eng', config='--psm 11').upper()
         
@@ -111,10 +108,10 @@ async def verify_image_details(attachment, today_str):
         if not is_game: return False, "❌ รูปที่ส่งมาไม่ใช่รูปจบเกม ROV นะคะพี่ขา!"
         if not date_found: return False, f"❌ วันที่ในรูปไม่ตรงกับวันนี้ (ต้องการ {today_str}) ค่ะ!"
         return True, "ผ่าน"
-    except:
-        return False, "❌ หนูอ่านรูปภาพไม่ได้ค่ะพี่ขา"
+    except Exception:
+        return False, "❌ หนูอ่านรูปภาพไม่ได้ค่ะพี่ขา (OCR Error)"
 
-# --- [5] สร้าง Class Bot และระบบ Auto-Reset แบบข้ามวัน ---
+# --- [5] สร้าง Class Bot และระบบ Auto-Reset ---
 class PoliceMasterBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.all()
@@ -124,7 +121,7 @@ class PoliceMasterBot(commands.Bot):
         self.daily_reset_task.start()
         self.check_warning_task.start()
         await self.tree.sync()
-        print(f"--- ✅ Police Bot V7.2 [Full Original Restore] Online ---")
+        print(f"--- ✅ Police Bot V7.2 Online & Synced ---")
 
     @tasks.loop(seconds=30)
     async def daily_reset_task(self):
@@ -153,7 +150,6 @@ class PoliceMasterBot(commands.Bot):
                     uid = int(uid_str)
                     member = guild.get_member(uid)
                     
-                    # 1. เช็ควันลา (ช่อง J)
                     leave_until = row[9]
                     if leave_until:
                         try:
@@ -163,7 +159,6 @@ class PoliceMasterBot(commands.Bot):
                                 new_rows.append(row); continue
                         except: pass
                     
-                    # 2. เช็คใบเหลือง (ขาดงานห่าง 3 วัน)
                     warns = int(row[4]) if row[4].isdigit() else 0
                     last_check_str = row[8]
                     if last_check_str and row[6] != "เช็คแล้ว":
@@ -182,17 +177,13 @@ class PoliceMasterBot(commands.Bot):
                         if warns >= 1: await member.add_roles(yellow_role)
                         else: await member.remove_roles(yellow_role)
 
-                    # 3. ล้างค่าสำหรับวันใหม่
-                    row[3] = ""             # D: ล้าง 'เล่นกับใคร'
-                    row[5] = ""             # F: ล้างรูป
-                    row[6] = "ยังไม่ได้เช็ค"  # G: รีเซ็ตสถานะ
-                    row[9] = ""             # J: ล้างวันลา
+                    row[3], row[5], row[6], row[9] = "", "", "ยังไม่ได้เช็ค", ""
                     new_rows.append(row)
                 
                 sheet.clear()
                 sheet.update('A1', new_rows)
                 last_reset_date = today_obj
-                print(f"✨ รีเซ็ตวันใหม่เรียบร้อยแล้วค่ะพี่ขา")
+                print(f"✨ รีเซ็ตวันใหม่เรียบร้อยแล้วค่ะ")
             except Exception as e:
                 print(f"❌ Reset Error: {e}")
 
@@ -210,12 +201,16 @@ class PoliceMasterBot(commands.Bot):
 
 bot = PoliceMasterBot()
 
-# --- [6] ระบบ Events ---
+# --- [6] Events & Slash Commands ---
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user.name} ({bot.user.id})")
+
 @bot.event
 async def on_message(message):
     if message.author.bot: return
     
-    # ยอมรับ E-sport (ช่อง L)
     if message.channel.id == ESPORT_CHANNEL_ID and "ยอมรับการลงทะเบียน" in message.content:
         ids = sheet.col_values(1)
         if str(message.author.id) in ids:
@@ -223,7 +218,6 @@ async def on_message(message):
             safe_update(f'L{idx}', [["ลงทะเบียน E-sport แล้ว"]])
             await message.reply(f"✅ บันทึกข้อมูล E-sport ให้เรียบร้อยแล้วค่ะพี่!")
 
-    # ห้องลงทะเบียน (ตอบกลับแจ้งเวลาเทส + อิโมจิ)
     if message.channel.id == REG_CHANNEL_ID and message.attachments:
         try:
             role = message.guild.get_role(PENDING_ROLE_ID)
@@ -231,70 +225,29 @@ async def on_message(message):
             await message.add_reaction(EMOJI_WAIT)
             embed = discord.Embed(
                 title=f"{EMOJI_WAIT} หนูรับเรื่องการลงทะเบียนให้แล้วนะคะ",
-                description="📍 **มารอที่ห้องรอเทส เวลา 20.00 น.** นะคะ\n⚠️ เรทได้ไม่เกิน 15 นาทีนะคะ หากเกินหนูขออนุญาตตัดรอบเป็นวันถัดไปน้า",
+                description="📍 **มารอที่ห้องรอเทส เวลา 20.00 น.** นะคะ\n⚠️ เรทได้ไม่เกิน 15 นาทีนะคะ",
                 color=0x3498db
             )
-            await message.reply(embed=embed, mention_author=True, delete_after=120)
+            await message.reply(embed=embed, delete_after=120)
         except: pass
 
-    # อัปเดตชื่อในเกม
-    if message.channel.id == UPDATE_PROFILE_CHANNEL_ID and "ชื่อในเกมใหม่" in message.content:
-        new_ign = get_clean_field(message.content, "ชื่อในเกมใหม่")
-        ids = sheet.col_values(1)
-        if str(message.author.id) in ids:
-            idx = ids.index(str(message.author.id)) + 1
-            safe_update(f'K{idx}', [[new_ign]])
-            await message.reply(f"✅ อัปเดตชื่อใหม่ช่อง K ให้แล้วค่ะ: {new_ign}")
-
-@bot.event
-async def on_member_update(before, after):
-    added = [r for r in after.roles if r not in before.roles]
-    if not added: return
-    is_pass = any(r.id in ALLOWED_ROLE_IDS for r in added)
-    is_reject = any(r.id == REJECT_ROLE_ID for r in added)
-    if not (is_pass or is_reject): return
-
-    ch = bot.get_channel(REG_CHANNEL_ID)
-    async for msg in ch.history(limit=50):
-        if msg.author.id == after.id and msg.attachments:
-            await msg.clear_reactions()
-            if is_pass:
-                role_name = [r for r in added if r.id in ALLOWED_ROLE_IDS][0].name
-                await msg.add_reaction(EMOJI_PASS)
-                try: await after.send(f"🏆 **ยินดีด้วยนะคะ!** คุณผ่านการเทสและได้รับยศ **{role_name}** แล้วนะคะ!")
-                except: pass
-                
-                d = {"nick": get_clean_field(msg.content, "ชื่อเล่น"), "ign": get_clean_field(msg.content, "ชื่อในเกม"), "age": get_clean_field(msg.content, "อายุ"), "pos": get_clean_field(msg.content, "ตำแหน่ง"), "rank": get_clean_field(msg.content, "แรงค์สูงสุด")}
-                sum_b = f"{d['nick']} (อายุ: {d['age']} | {d['pos']} | {d['rank']})"
-                today = datetime.datetime.now(tz).strftime("%Y-%m-%d")
-                new_row = [str(after.id), sum_b, role_name, "", "0", msg.attachments[0].url, "เช็คแล้ว", "", today, "", d['ign']]
-                sheet.append_row(new_row)
-            elif is_reject:
-                await msg.add_reaction(EMOJI_NOPASS)
-                try: await after.send("❌ **เสียใจด้วยนะคะ** คุณไม่ผ่านการเทสเข้าร่วมกิลด์ในครั้งนี้ค่ะ")
-                except: pass
-            try: await after.remove_roles(after.guild.get_role(PENDING_ROLE_ID))
-            except: pass
-            break
-
-# --- [7] Slash Commands ---
 @bot.tree.command(name="checkin", description="เช็คชื่อเข้างาน (ดักคนเหลี่ยม)")
 async def checkin(interaction: discord.Interaction, member1: discord.Member, image: discord.Attachment, member2: discord.Member=None, member3: discord.Member=None, member4: discord.Member=None):
     await interaction.response.defer(ephemeral=True)
     
-    # ดักคนเหลี่ยม: ห้ามแท็กตัวเอง/ห้ามแท็กซ้ำ
     members_input = [member1, member2, member3, member4]
     team = [interaction.user] 
     for m in members_input:
         if m:
             if m.id == interaction.user.id:
-                return await interaction.followup.send("❌ พี่จะแท็กชื่อตัวเองทำไมคะเนี่ย ไม่เหลี่ยมสิคะ!")
+                return await interaction.followup.send("❌ พี่จะแท็กชื่อตัวเองทำไมคะ ไม่เหลี่ยมสิคะ!")
             if m in team:
-                return await interaction.followup.send(f"❌ พี่แท็ก {m.display_name} ซ้ำแล้วนะคะ ตรวจสอบดีๆ น้า")
+                return await interaction.followup.send(f"❌ พี่แท็ก {m.display_name} ซ้ำแล้วนะคะ")
             team.append(m)
 
     all_data = sheet.get_all_values()
     all_ids = [row[0] for row in all_data]
+    
     for m in team:
         if str(m.id) not in all_ids: return await interaction.followup.send(f"❌ {m.mention} ไม่มีชื่อในระบบค่ะ")
     
@@ -313,7 +266,6 @@ async def checkin(interaction: discord.Interaction, member1: discord.Member, ima
         safe_update(f'F{idx}', [[image.url]])
         safe_update(f'G{idx}', [["เช็คแล้ว"]])
         safe_update(f'I{idx}', [[today]])
-        
         team_status.append(f"{u.mention} (🟡 {warns_int} ใบ)")
     
     embed = discord.Embed(title=f"{EMOJI_TIKTUK} เช็คชื่อสำเร็จแล้วค่ะพี่", color=0x2ecc71)
@@ -322,15 +274,10 @@ async def checkin(interaction: discord.Interaction, member1: discord.Member, ima
     await interaction.channel.send(content=f"✅ {interaction.user.mention} ส่งงานเรียบร้อยค่ะพี่ขา", embed=embed)
     await interaction.followup.send("เช็คชื่อสำเร็จแล้วน้า!")
 
-@bot.tree.command(name="leave", description="แจ้งลาพักงานค่ะ")
-async def leave(interaction: discord.Interaction, days: int, reason: str):
-    await interaction.response.defer(ephemeral=True)
-    all_ids = sheet.col_values(1)
-    if str(interaction.user.id) not in all_ids: return await interaction.followup.send("❌ ไม่พบชื่อในระบบน้า")
-    idx = all_ids.index(str(interaction.user.id)) + 1
-    until = (datetime.datetime.now(tz) + datetime.timedelta(days=days)).strftime("%Y-%m-%d")
-    if safe_update(f'G{idx}:J{idx}', [["ลา", reason, "", until]]):
-        await interaction.channel.send(f"🟢 {interaction.user.mention} ลาพักงาน {days} วัน (ถึงวันที่ {until}) นะคะ")
-        await interaction.followup.send("แจ้งลาเรียบร้อยแล้วค่ะ!")
-
-bot.run(TOKEN)
+# --- [7] รันบอท (จุดสำคัญ) ---
+if __name__ == "__main__":
+    if TOKEN:
+        keep_alive()  # เริ่มระบบ Flask เพื่อค้างสถานะบน Render
+        bot.run(TOKEN)
+    else:
+        print("❌ Error: ไม่พบ DISCORD_TOKEN ใน Environment Variables!")
