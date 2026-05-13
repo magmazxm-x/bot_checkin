@@ -6,6 +6,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import datetime, re, pytz, asyncio, io, time
 import pytesseract
 from PIL import Image, ImageEnhance
+import os
 from flask import Flask
 from threading import Thread
 
@@ -16,7 +17,7 @@ def home():
     return "Bot is Online!"
 
 def run():
-    # Render จะส่ง Port มาให้ทาง Environment Variable ชื่อ 'PORT'
+    # ดึง Port ที่ Render กำหนดมาให้ ถ้าไม่มีให้ใช้ 8080
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
@@ -24,8 +25,9 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# --- ก่อนบรรทัดสุดท้าย (bot.run) ให้เรียกใช้ ---
+# เรียกใช้ก่อน bot.run(TOKEN)
 keep_alive()
+
 bot.run(TOKEN)
 
 import os
